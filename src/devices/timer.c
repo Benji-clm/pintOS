@@ -26,8 +26,9 @@ static int64_t ticks;
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
-/* Sleeping threads list */
+/* Sleeping threads list */ 
 static struct list sleeping_threads;
+static struct lock sleeping_threads_lock;
 
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
@@ -43,6 +44,7 @@ timer_init (void)
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
   list_init(&sleeping_threads);  // Initialize the sleeping threads list
+  lock_init(&sleeping_threads_lock); // Initialize the lock for sleeping threads list
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -122,10 +124,12 @@ timer_sleep (int64_t ticks)
   enum intr_level old_level = intr_disable ();
 
   add_thread_to_sleeping_list(thread_current(), start + ticks);
-  thread_block();
+  thread_block(); // I lowkey dont know why this renable interrupts but I have to reenable it again
 
+  intr_set_level (old_level); // Restore previous interrupt level
+  
   // free the sleeping_thread struct after waking up
-  intr_disable(); // currently implemented by disabling interrupts
+  lock_acquire(&sleeping_threads_lock);
   struct list_elem *e;
   for (e = list_begin(&sleeping_threads); e != list_end(&sleeping_threads); e = list_next(e)) {
     struct sleeping_thread *st = list_entry(e, struct sleeping_thread, elem);
@@ -134,7 +138,7 @@ timer_sleep (int64_t ticks)
       break;  
     }
   }
-  intr_set_level(old_level);
+  lock_release(&sleeping_threads_lock);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
