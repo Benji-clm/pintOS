@@ -7,6 +7,8 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "lib/kernel/list.h"
+#include "threads/malloc.h"
   
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -24,6 +26,9 @@ static int64_t ticks;
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
+/* Sleeping threads list */
+static struct list sleeping_threads;
+
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
@@ -37,6 +42,7 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  list_init(&sleeping_threads);  // Initialize the sleeping threads list
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -84,16 +90,51 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
+bool compare_wake_up_ticks(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+  struct sleeping_thread *st_a = list_entry(a, struct sleeping_thread, elem);
+  struct sleeping_thread *st_b = list_entry(b, struct sleeping_thread, elem);
+  return st_a->wake_up_tick < st_b->wake_up_tick;
+}
+
+void 
+add_thread_to_sleeping_list (struct thread *t, int64_t wake_up_tick) 
+{
+  struct sleeping_thread *st = malloc(sizeof(struct sleeping_thread));
+  st->thread = t;
+  st->wake_up_tick = wake_up_tick;
+  list_insert_ordered(
+    &sleeping_threads, 
+    &st->elem, 
+    compare_wake_up_ticks,
+    NULL
+  );
+}
+
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
 timer_sleep (int64_t ticks) 
 {
   int64_t start = timer_ticks ();
-
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+
+  // Thread block reenables interrupts internally when context switching and requires disabling before calling
+  enum intr_level old_level = intr_disable ();
+
+  add_thread_to_sleeping_list(thread_current(), start + ticks);
+  thread_block();
+
+  // free the sleeping_thread struct after waking up
+  intr_disable(); // currently implemented by disabling interrupts
+  struct list_elem *e;
+  for (e = list_begin(&sleeping_threads); e != list_end(&sleeping_threads); e = list_next(e)) {
+    struct sleeping_thread *st = list_entry(e, struct sleeping_thread, elem);
+    if (st->thread == thread_current()) {
+      free(st);
+      break;  
+    }
+  }
+  intr_set_level(old_level);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -172,6 +213,18 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+  for (;;) {
+    if (list_empty(&sleeping_threads)) {
+      break;
+    }
+    struct list_elem *front = list_front(&sleeping_threads);
+    struct sleeping_thread *st = list_entry(front, struct sleeping_thread, elem);
+    if (st->wake_up_tick > ticks) {
+      break;
+    }
+    list_pop_front(&sleeping_threads);
+    thread_unblock(st->thread);
+  }
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
