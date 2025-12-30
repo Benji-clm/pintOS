@@ -57,7 +57,7 @@ sema_init (struct semaphore *sema, unsigned value)
    interrupt handler.  This function may be called with
    interrupts disabled, but if it sleeps then the next scheduled
    thread will probably turn interrupts back on. */
-void
+int
 sema_down (struct semaphore *sema) 
 {
   enum intr_level old_level;
@@ -66,13 +66,16 @@ sema_down (struct semaphore *sema)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
+  int curr_priority = thread_get_priority();
   while (sema->value == 0) 
     {
-      list_push_back (&sema->waiters, &thread_current ()->elem);
+      list_insert_ordered(&sema->waiters, &thread_current()->elem, thread_priority_compare, NULL);
       thread_block ();
+      intr_disable ();
     }
   sema->value--;
   intr_set_level (old_level);
+  return curr_priority;
 }
 
 /* Down or "P" operation on a semaphore, but only if the
@@ -113,17 +116,20 @@ sema_up (struct semaphore *sema)
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
-  if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                struct thread, elem));
+  if (!list_empty (&sema->waiters))
+    {
+      struct thread *highest_waiter = list_entry (list_pop_front (&sema->waiters), struct thread, elem); 
+      thread_unblock (highest_waiter);
+    }
   sema->value++;
   intr_set_level (old_level);
+  thread_yield_if_not_highest();
 }
 
 static void sema_test_helper (void *sema_);
 
 /* Self-test for semaphores that makes control "ping-pong"
-   between a pair of threads.  Insert calls to printf() to see
+   between a pair of threads.  Insert calls to printf() to see/
    what's going on. */
 void
 sema_self_test (void) 
@@ -196,8 +202,24 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  // If a lock is already held, donate priority to the lock holder
+  if (lock->holder != NULL) {
+    int curr_priority = thread_get_priority();
+    int holder_priority = lock->holder->priority;
+    if (curr_priority > holder_priority) {
+      lock->holder->priority = curr_priority;
+    }
+  }
+
+  // Acquire the lock
   sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+
+  // Record the original priority of the lock holder and set the current holder. 
+  // Interrupts disabled so that no priority donations occur till the priority is recorded
+  int old_intr = intr_disable();
+    lock->holder_original_priority = thread_get_priority();
+    lock->holder = thread_current ();
+  intr_set_level(old_intr);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -232,6 +254,7 @@ lock_release (struct lock *lock)
   ASSERT (lock_held_by_current_thread (lock));
 
   lock->holder = NULL;
+  thread_set_priority(lock->holder_original_priority); 
   sema_up (&lock->semaphore);
 }
 
@@ -295,7 +318,7 @@ cond_wait (struct condition *cond, struct lock *lock)
   ASSERT (lock_held_by_current_thread (lock));
   
   sema_init (&waiter.semaphore, 0);
-  list_push_back (&cond->waiters, &waiter.elem);
+  list_insert_ordered(&cond->waiters, &waiter.elem, thread_priority_compare, NULL);
   lock_release (lock);
   sema_down (&waiter.semaphore);
   lock_acquire (lock);
@@ -335,4 +358,4 @@ cond_broadcast (struct condition *cond, struct lock *lock)
 
   while (!list_empty (&cond->waiters))
     cond_signal (cond, lock);
-}
+  }

@@ -223,6 +223,14 @@ thread_create (const char *name, int priority,
   return tid;
 }
 
+// Comparison for descending thread priority
+bool
+thread_priority_compare(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+  struct thread *thread_a = list_entry(a, struct thread, elem);
+  struct thread *thread_b = list_entry(b, struct thread, elem);
+  return thread_a->priority > thread_b->priority;
+}
+
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
 
@@ -256,8 +264,10 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list, &t->elem, thread_priority_compare, NULL);
   t->status = THREAD_READY;
+  if (thread_current () != idle_thread && t->priority > thread_current ()->priority)
+    thread_yield_if_not_highest();
   intr_set_level (old_level);
 }
 
@@ -323,7 +333,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+   list_insert_ordered(&ready_list, &cur->elem, thread_priority_compare, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -351,6 +361,7 @@ void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+  thread_yield_if_not_highest();
 }
 
 /* Returns the current thread's priority. */
@@ -491,7 +502,7 @@ thread_init (struct thread *t, const char *name, int priority)
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
-  list_push_back (&all_list, &t->allelem);
+  list_insert_ordered(&all_list, &t->allelem, thread_priority_compare, NULL);
   intr_set_level (old_level);
 }
 
@@ -603,6 +614,18 @@ allocate_tid (void)
   lock_release (&tid_lock);
 
   return tid;
+}
+
+void thread_yield_if_not_highest(void) {
+  enum intr_level old_level = intr_disable ();
+  if (!list_empty(&ready_list)) {
+    struct thread *highest_priority_thread = list_entry(list_front(&ready_list), struct thread, elem);
+    if (highest_priority_thread->priority > thread_current()->priority) {
+      thread_yield();
+      return;
+    }
+  }
+  intr_set_level (old_level);
 }
 
 /* Offset of `stack' member within `struct thread'.
