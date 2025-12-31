@@ -617,6 +617,8 @@ allocate_tid (void)
 }
 
 void thread_yield_if_not_highest(void) {
+  if (intr_context())
+    return;
   enum intr_level old_level = intr_disable ();
   if (!list_empty(&ready_list)) {
     struct thread *highest_priority_thread = list_entry(list_front(&ready_list), struct thread, elem);

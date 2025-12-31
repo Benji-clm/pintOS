@@ -123,7 +123,10 @@ timer_sleep (int64_t ticks)
   // Thread block reenables interrupts internally when context switching and requires disabling before calling
   enum intr_level old_level = intr_disable ();
 
+  lock_acquire(&sleeping_threads_lock);
   add_thread_to_sleeping_list(thread_current(), start + ticks);
+  lock_release(&sleeping_threads_lock);
+
   thread_block(); // I lowkey dont know why this renable interrupts but I have to reenable it again
 
   intr_set_level (old_level); // Restore previous interrupt level
@@ -134,6 +137,7 @@ timer_sleep (int64_t ticks)
   for (e = list_begin(&sleeping_threads); e != list_end(&sleeping_threads); e = list_next(e)) {
     struct sleeping_thread *st = list_entry(e, struct sleeping_thread, elem);
     if (st->thread == thread_current()) {
+      list_remove(e);
       free(st);
       break;  
     }
